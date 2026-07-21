@@ -111,3 +111,13 @@ Author
 Kolec
 
 Developed since 2026.
+
+License
+
+This project is provided for educational, research, preservation, and reverse engineering purposes only.
+
+Lands of Lore II: Guardians of Destiny, its assets, trademarks, and copyrights remain the property of Electronic Arts / Westwood Studios and their respective owners.
+
+About the Project
+
+LOL2 Toolchain aims to provide an open, reliable, and easy-to-use toolkit for exploring, extracting, decompressing, and rebuilding the internal resources of Lands of Lore II. It combines reverse engineering research with practical utilities for archive analysis, file format documentation, preservation, and game modding.
