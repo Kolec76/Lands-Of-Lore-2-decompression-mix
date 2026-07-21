@@ -1,0 +1,720 @@
+﻿// ---------------------------------------------------------------------------
+
+#include <vcl.h>
+#pragma hdrstop
+
+#include <stdio.h>
+#include <stdint.h>
+#include <direct.h>
+#include "Unit1.h"
+
+#include "RefPack.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <cstring>
+
+// ---------------------------------------------------------------------------
+#pragma package(smart_init)
+#pragma resource "*.dfm"
+TForm1 *Form1;
+
+// ---------------------------------------------------------------------------
+__fastcall TForm1::TForm1(TComponent* Owner) : TForm(Owner) {
+	ScanSphereFolder();
+
+}
+
+// ---------------------------------------------------------------------------
+void __fastcall TForm1::ScanSphereFolder() {
+	TreeView1->Items->Clear();
+
+	// sprawdzamy SPHERE1, SPHERE2, SPHERE3
+	for (int s = 1; s <= 3; s++) {
+		AnsiString sphereName = "SPHERE" + IntToStr(s);
+
+		if (!DirectoryExists(sphereName))
+			continue;
+
+		TTreeNode* sphereNode = TreeView1->Items->Add(NULL, sphereName);
+
+		// przeglądamy folder leveli
+		TSearchRec sr;
+		if (FindFirst(sphereName + "\\*.*", faDirectory, sr) == 0) {
+			do {
+				if ((sr.Attr & faDirectory)
+					&& sr.Name != "." && sr.Name != "..") {
+					// level folder
+					AnsiString levelPath = sphereName + "\\" + sr.Name;
+
+					TTreeNode* levelNode =
+						TreeView1->Items->AddChild(sphereNode, sr.Name);
+
+					// teraz pliki w levelu
+					TSearchRec sr2;
+					if (FindFirst(levelPath + "\\*.*", faAnyFile, sr2) == 0) {
+						do {
+							if (!(sr2.Attr & faDirectory)) {
+								TreeView1->Items->AddChild(levelNode, sr2.Name);
+							}
+
+						}
+						while (FindNext(sr2) == 0);
+
+						FindClose(sr2);
+					}
+				}
+
+			}
+			while (FindNext(sr) == 0);
+
+			FindClose(sr);
+		}
+	}
+
+	TreeView1->FullExpand();
+}
+
+// ------------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+
+AnsiString g_mixPath;
+
+// ============================================================
+// MIX STRUCTURES
+// ============================================================
+
+#pragma pack(push,1)
+
+typedef struct {
+	unsigned short c_files;
+	unsigned int size;
+} MixHeader;
+
+typedef struct {
+	unsigned int id;
+	unsigned int offset;
+	unsigned int size;
+} MixIndexEntry;
+
+#pragma pack(pop)
+
+// ============================================================
+// EXTRACT FILE (1:1 z konsoli)
+// ============================================================
+
+void extract_file(FILE* mix, unsigned int offset, unsigned int size,
+	const char* filename) {
+	FILE* out = fopen(filename, "wb");
+	if (!out)
+		return;
+
+	fseek(mix, offset, SEEK_SET);
+
+	unsigned char buffer[4096];
+	unsigned int remaining = size;
+
+	while (remaining > 0) {
+		unsigned int chunk = remaining > sizeof(buffer) ? sizeof(buffer) :
+			remaining;
+
+		fread(buffer, 1, chunk, mix);
+		fwrite(buffer, 1, chunk, out);
+
+		remaining -= chunk;
+	}
+
+	fclose(out);
+}
+void __fastcall TForm1::Button1Click(TObject *Sender)
+{
+    // -------------------------------------------------------
+    // OpenDialog ustawienia
+    // -------------------------------------------------------
+
+    AnsiString exeDir = ExtractFilePath(Application->ExeName);
+
+    OpenDialog1->InitialDir = exeDir;      // start w folderze gry
+	OpenDialog1->Filter = "WSX files (*.WSX)|*.WSX";
+    OpenDialog1->FilterIndex = 1;
+    OpenDialog1->Options << ofFileMustExist;
+
+    if (!OpenDialog1->Execute())
+        return;
+
+    g_mixPath = OpenDialog1->FileName;
+
+    AnsiString fileOnly = ExtractFileName(g_mixPath);
+
+    // -------------------------------------------------------
+    // Walidacja – tylko oficjalne levele
+    // -------------------------------------------------------
+
+    if (
+        fileOnly != "CKEEP.WSX" &&
+        fileOnly != "L3_DH.MIX" &&
+        fileOnly != "L4_HJ.MIX" &&
+        fileOnly != "L5_HC.MIX" &&
+        fileOnly != "L7_DH.MIX" &&
+        fileOnly != "L8_SJ.MIX" &&
+        fileOnly != "L9_DR.MIX" &&
+        fileOnly != "L10_DC.MIX" &&
+        fileOnly != "L12_CM.MIX" &&
+        fileOnly != "L13_RC.MIX" &&
+        fileOnly != "L14_HT.MIX" &&
+        fileOnly != "L16_CA.MIX" &&
+        fileOnly != "L17_HC.MIX" &&
+        fileOnly != "L19_BC.MIX" &&
+        fileOnly != "L20_BB.MIX"
+       )
+    {
+        Memo1->Lines->Add("Ten plik MIX nie jest obslugiwanym levelem.");
+        g_mixPath = "";
+        return;
+    }
+
+    Memo1->Clear();
+    Memo1->Lines->Add("Wybrano: " + g_mixPath);
+
+    // -------------------------------------------------------
+    // Backup MIX
+    // -------------------------------------------------------
+
+    AnsiString kopiaDir = exeDir + "KOPY_MIX";
+    _mkdir(kopiaDir.c_str());
+
+    AnsiString backupPath = kopiaDir + "\\" + fileOnly;
+
+    if (!CopyFileW(
+            UnicodeString(g_mixPath).c_str(),
+            UnicodeString(backupPath).c_str(),
+            FALSE))
+    {
+        Memo1->Lines->Add("Blad tworzenia kopii.");
+    }
+    else
+    {
+        Memo1->Lines->Add("Utworzono kopie: " + backupPath);
+    }
+
+    // -------------------------------------------------------
+    // Reset przyciskow
+    // -------------------------------------------------------
+
+    Button2->Enabled = true;   // Extract
+    Button3->Enabled = false;  // Decompress
+    Button5->Enabled = false;  // Reset MIX
+    Button6->Enabled = false;  // Build SPHERE
+}
+
+// ---------------------------------------------------------------------------
+
+// -----------------------------------------------------
+// MAP heuristic
+// -----------------------------------------------------
+bool LooksLikeMap(unsigned char* header) {
+	int small = 0;
+	int large = 0;
+
+	for (int i = 0; i < 8; i++) {
+		unsigned int v = header[i * 4] | (header[i * 4 + 1] << 8) |
+			(header[i * 4 + 2] << 16) | (header[i * 4 + 3] << 24);
+
+		if (v < 256)
+			small++;
+		if (v > 1000)
+			large++;
+	}
+
+	return (small > large);
+}
+
+void __fastcall TForm1::Button2Click(TObject *Sender) {
+
+	if (g_mixPath.IsEmpty()) {
+		Memo1->Lines->Add("Nie wybrano pliku MIX.");
+		return;
+	}
+
+	FILE* f = fopen(g_mixPath.c_str(), "rb");
+	if (!f) {
+		Memo1->Lines->Add("Nie mozna otworzyc pliku.");
+		return;
+	}
+
+	Memo1->Clear();
+
+	AnsiString levelName = ExtractFileName(g_mixPath);
+	int dot = levelName.LastDelimiter(".");
+	if (dot > 0)
+		levelName = levelName.SubString(1, dot - 1);
+
+	_mkdir("WORK");
+	AnsiString workFolder = "WORK\\" + levelName;
+	_mkdir(workFolder.c_str());
+
+	MixHeader header;
+	fread(&header, sizeof(MixHeader), 1, f);
+
+	if (header.c_files < 2 || header.c_files > 3) {
+		Memo1->Lines->Add("Nieobslugiwany typ MIX.");
+		fclose(f);
+		return;
+	}
+
+	MixIndexEntry* index =
+		(MixIndexEntry*)malloc(sizeof(MixIndexEntry) * header.c_files);
+
+	fread(index, sizeof(MixIndexEntry), header.c_files, f);
+
+	uint32_t base_offset = sizeof(MixHeader) +
+		(header.c_files*sizeof(MixIndexEntry));
+
+	struct Entry {
+		uint32_t offset;
+		uint32_t size;
+		int type; // 1=MAP, 2=ODF, 3=TEX
+	};
+
+	Entry entries[3];
+
+	for (int i = 0; i < header.c_files; i++) {
+		entries[i].offset = index[i].offset + base_offset;
+		entries[i].size = index[i].size;
+		entries[i].type = 0;
+	}
+
+	// -------------------------------------------------
+	// ROZPOZNANIE PO ROZMIARZE
+	// -------------------------------------------------
+
+	if (header.c_files == 3) {
+		int minIndex = 0;
+		int maxIndex = 0;
+
+		for (int i = 1; i < 3; i++) {
+			if (entries[i].size < entries[minIndex].size)
+				minIndex = i;
+
+			if (entries[i].size > entries[maxIndex].size)
+				maxIndex = i;
+		}
+
+		// najmniejszy → ODF
+		entries[minIndex].type = 2;
+
+		// największy → TEX
+		entries[maxIndex].type = 3;
+
+		// pozostały → MAP
+		for (int i = 0; i < 3; i++)
+			if (entries[i].type == 0)
+				entries[i].type = 1;
+	}
+	else if (header.c_files == 2) {
+		if (entries[0].size < entries[1].size) {
+			entries[0].type = 2; // ODF
+			entries[1].type = 1; // MAP
+		}
+		else {
+			entries[1].type = 2;
+			entries[0].type = 1;
+		}
+	}
+
+	// -------------------------------------------------
+	// EKSTRAKCJA
+	// -------------------------------------------------
+
+	char filename[260];
+	char tmp[128];
+
+	for (int i = 0; i < header.c_files; i++) {
+		sprintf(tmp, "=== FILE %d ===", i);
+		Memo1->Lines->Add(tmp);
+
+		sprintf(tmp, "Offset: 0x%08X", entries[i].offset);
+		Memo1->Lines->Add(tmp);
+
+		sprintf(tmp, "Size: 0x%08X", entries[i].size);
+		Memo1->Lines->Add(tmp);
+
+		if (entries[i].type == 1) {
+			Memo1->Lines->Add("Typ: MAP");
+			sprintf(filename, "WORK\\%s\\%s.MAP", levelName.c_str(),
+				levelName.c_str());
+		}
+		else if (entries[i].type == 2) {
+			Memo1->Lines->Add("Typ: ODF");
+			sprintf(filename, "WORK\\%s\\%s.ODF", levelName.c_str(),
+				levelName.c_str());
+		}
+		else if (entries[i].type == 3) {
+			Memo1->Lines->Add("Typ: TEX");
+			sprintf(filename, "WORK\\%s\\%s.TEX", levelName.c_str(),
+				levelName.c_str());
+		}
+		else
+			continue;
+
+		extract_file(f, entries[i].offset, entries[i].size, filename);
+
+		Memo1->Lines->Add("Zapisano: " + AnsiString(filename));
+	}
+
+	free(index);
+	fclose(f);
+
+	Memo1->Lines->Add("Extract zakonczony.");
+	Button3->Enabled = true;
+}
+
+// ---------------------------------------------------------------------------
+
+// -------------------------------------------------------------------------------
+
+void __fastcall TForm1::Button3Click(TObject *Sender) {
+	if (g_mixPath.IsEmpty()) {
+		Memo1->Lines->Add("Brak wczytanego pliku MIX.");
+		return;
+	}
+
+	Memo1->Clear();
+
+	// -----------------------------------------------------
+	// NAZWA LEVELU z MIX (tak jak w Extract)
+	// -----------------------------------------------------
+
+	AnsiString levelName = ExtractFileName(g_mixPath);
+	int dot = levelName.LastDelimiter(".");
+	if (dot > 0)
+		levelName = levelName.SubString(1, dot - 1);
+
+	// -----------------------------------------------------
+	// Ścieżka do TEX w WORK
+	// -----------------------------------------------------
+
+	AnsiString texPath = "WORK\\" + levelName + "\\" + levelName + ".TEX";
+
+	Memo1->Lines->Add("Wrapper TEX: " + texPath);
+
+	if (!FileExists(texPath)) {
+		Memo1->Lines->Add("Brak TEX w WORK. Najpierw wykonaj Extract.");
+		return;
+	}
+
+	// -----------------------------------------------------
+	// Otwieramy TEX
+	// -----------------------------------------------------
+
+	FILE* f = fopen(texPath.c_str(), "rb");
+	if (!f) {
+		Memo1->Lines->Add("Nie mozna otworzyc TEX.");
+		return;
+	}
+
+	fseek(f, 0, SEEK_END);
+	size_t file_size = ftell(f);
+	rewind(f);
+
+	char tmp[128];
+	sprintf(tmp, "File size: %u bytes", (unsigned int)file_size);
+	Memo1->Lines->Add(tmp);
+
+	uint8_t* file_data = (uint8_t*)malloc(file_size);
+	fread(file_data, 1, file_size, f);
+	fclose(f);
+
+	// -----------------------------------------------------
+	// TEX WRAPPER:
+	// 14 FB C6 00
+	// [DWORD size]
+	// [RefPack block]
+	// -----------------------------------------------------
+
+	size_t pos = 0;
+	pos += 4; // pomijamy 14 FB C6 00
+
+	uint8_t* final_output = (uint8_t*)malloc(MAX_OUTPUT);
+
+	size_t final_size = 0;
+	int block_index = 0;
+
+	ProgressBar1->Min = 0;
+	ProgressBar1->Max = 100;
+	ProgressBar1->Position = 0;
+
+	// -----------------------------------------------------
+	// Wrapper loop
+	// -----------------------------------------------------
+
+	while (pos + 4 <= file_size) {
+		sprintf(tmp, "BLOCK %d at 0x%X", block_index, (unsigned int)pos);
+
+		Memo1->Lines->Add(tmp);
+
+		uint32_t block_size = file_data[pos] | (file_data[pos + 1] << 8) |
+			(file_data[pos + 2] << 16) | (file_data[pos + 3] << 24);
+
+		sprintf(tmp, "Block size: %u", block_size);
+		Memo1->Lines->Add(tmp);
+
+		pos += 4;
+
+		if (block_size == 0)
+			break;
+
+		if (pos + block_size > file_size) {
+			Memo1->Lines->Add("Invalid block size.");
+			break;
+		}
+
+		uint8_t* block_out = (uint8_t*)malloc(MAX_OUTPUT);
+
+		size_t out_size = 0;
+		size_t consumed = 0;
+
+		int r = decompress(file_data + pos, block_size, block_out, out_size,
+			consumed);
+
+		if (r != 0) {
+			Memo1->Lines->Add("Blad dekompresji.");
+			free(block_out);
+			break;
+		}
+
+		memcpy(final_output + final_size, block_out, out_size);
+
+		final_size += out_size;
+
+		free(block_out);
+
+		pos += block_size;
+		block_index++;
+
+		int percent = (int)((pos * 105) / file_size);
+
+		if (percent > 100)
+			percent = 100;
+
+		ProgressBar1->Position = percent;
+		Application->ProcessMessages();
+	}
+
+	// -----------------------------------------------------
+	// NADPISUJEMY TEX zdekompresowanym
+	// -----------------------------------------------------
+
+	FILE* out = fopen(texPath.c_str(), "wb");
+	if (out) {
+		fwrite(final_output, 1, final_size, out);
+		fclose(out);
+	}
+
+	free(final_output);
+	free(file_data);
+
+	Memo1->Lines->Add("OK: TEX zdekompresowany poprawnie.");
+
+	Button3->Enabled = false; // wyłącz po wykonaniu
+    Button6->Enabled = true; //sphere build
+}
+
+// ---------------------------------------------------------------------------
+void __fastcall TForm1::Button4Click(TObject *Sender) {
+	ShowMessage("***LOL2 TOOLCHAIN***\n\n"
+    "Place tool inside game folder.\n"
+
+	"1. Select MIX file\n"
+	"2. EXTRACT\n"
+	"3. DECOMPRESS\n"
+	"4. SPHERE_BUILD\n"
+	"5. Reset_MIX\n"
+
+
+	"Run game with:\n"
+	"-CD -NOCDCACHE -MIJAS\n\n                                           "
+	"*---By_Kolec_2026---*"
+
+
+
+		);
+}
+// ---------------------------------------------------------------------------
+
+void __fastcall TForm1::Button5Click(TObject *Sender)
+	// zerowanie MIX TU TRZEBA TEZ POPRAWIC CHYBA
+{
+	if (!TreeView1->Selected) {
+		Memo1->Lines->Add("Wybierz level.");
+		return;
+	}
+
+	TTreeNode* node = TreeView1->Selected;
+
+	// jeśli kliknięto plik → przejdź do folderu levelu
+	if (node->Level == 2)
+		node = node->Parent;
+
+	// musi być folder levelu (poziom 1)
+	if (node->Level != 1) {
+		Memo1->Lines->Add("Wybierz folder levelu.");
+		return;
+	}
+
+	AnsiString levelName = node->Text;
+
+	// MIX w folderze gry (tam gdzie exe)
+	AnsiString mixPath = ExtractFilePath(Application->ExeName) +
+		levelName + ".MIX";
+
+	if (!FileExists(mixPath)) {
+		Memo1->Lines->Add("Brak pliku MIX: " + mixPath);
+		return;
+	}
+
+	if (MessageDlg("Wyzerowac plik " + levelName + ".MIX ?", mtWarning,
+		TMsgDlgButtons() << mbYes << mbNo, 0) != mrYes)
+		return;
+
+	FILE* f = fopen(mixPath.c_str(), "wb");
+	if (!f) {
+		Memo1->Lines->Add("Blad otwarcia MIX.");
+		return;
+	}
+
+	fclose(f);
+
+	Memo1->Lines->Add("Wyzerowano MIX: " + levelName);
+}
+// ---------------------------------------------------------------------------
+
+void __fastcall TForm1::Button6Click(TObject *Sender) {
+	if (g_mixPath.IsEmpty()) {
+		Memo1->Lines->Add("Brak wczytanego MIX.");
+		return;
+	}
+
+	Memo1->Clear();
+
+	// ------------------------------
+	// NAZWA LEVELU z pliku MIX
+	// ------------------------------
+
+	AnsiString levelName = ExtractFileName(g_mixPath);
+	int dot = levelName.LastDelimiter(".");
+	if (dot > 0)
+		levelName = levelName.SubString(1, dot - 1);
+
+	AnsiString levelLower = levelName.LowerCase();
+
+	// ------------------------------
+	// TEX musi istnieć
+	// ------------------------------
+
+	AnsiString texPath = "WORK\\" + levelName + "\\" + levelName + ".TEX";
+
+	if (!FileExists(texPath)) {
+		Memo1->Lines->Add("Brak TEX w WORK.");
+		return;
+	}
+
+	// ------------------------------
+	// Wczytaj TEX
+	// ------------------------------
+
+	FILE* f = fopen(texPath.c_str(), "rb");
+	if (!f) {
+		Memo1->Lines->Add("Nie mozna otworzyc TEX.");
+		return;
+	}
+
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	rewind(f);
+
+	char* data = (char*)malloc(size);
+	fread(data, 1, size, f);
+	fclose(f);
+
+	// ------------------------------
+	// WYKRYWANIE SPHERE Z TEX
+	// ------------------------------
+
+	AnsiString sphereFolder = "";
+
+	for (long i = 0; i < size - 16; i++) {
+		if (data[i] == '\\' && (data[i + 1] == 's' || data[i + 1] == 'S') &&
+			(data[i + 2] == 'p' || data[i + 2] == 'P') && (data[i + 3] == 'h' ||
+			data[i + 3] == 'H') && (data[i + 4] == 'e' || data[i + 4] == 'E') &&
+			(data[i + 5] == 'r' || data[i + 5] == 'R') && (data[i + 6] == 'e' ||
+			data[i + 6] == 'E')) {
+			char sphereNum = data[i + 7];
+
+			if ((sphereNum == '1' || sphereNum == '2' || sphereNum == '3')
+				&& data[i + 8] == '\\') {
+				char* levelPtr = &data[i + 9];
+
+				AnsiString foundLevel = "";
+				int j = 0;
+
+				while (levelPtr[j] != '\\' && levelPtr[j] != '\0' && j < 32) {
+					foundLevel += levelPtr[j];
+					j++;
+				}
+
+				if (foundLevel.LowerCase() == levelLower) {
+					sphereFolder = "SPHERE";
+					sphereFolder += sphereNum;
+					// NIE break – bierzemy ostatnie trafienie
+				}
+			}
+		}
+	}
+
+	free(data);
+
+	if (sphereFolder.IsEmpty()) {
+		Memo1->Lines->Add("Nie wykryto SPHERE w TEX.");
+		return;
+	}
+
+	Memo1->Lines->Add("Wykryto: " + sphereFolder + "\\" + levelName);
+
+	// ------------------------------
+	// TWORZENIE STRUKTURY
+	// ------------------------------
+
+	_mkdir(sphereFolder.c_str());
+
+	AnsiString finalFolder = sphereFolder + "\\" + levelName;
+
+	_mkdir(finalFolder.c_str());
+
+	// ------------------------------
+	// PRZENOSZENIE PLIKÓW
+	// ------------------------------
+
+	AnsiString workBase = "WORK\\" + levelName + "\\";
+
+	MoveFileW(UnicodeString(workBase + levelName + ".ODF").c_str(),
+		UnicodeString(finalFolder + "\\" + levelName + ".ODF").c_str());
+
+	MoveFileW(UnicodeString(workBase + levelName + ".MAP").c_str(),
+		UnicodeString(finalFolder + "\\" + levelName + ".MAP").c_str());
+
+	MoveFileW(UnicodeString(workBase + levelName + ".TEX").c_str(),
+		UnicodeString(finalFolder + "\\" + levelName + ".TEX").c_str());
+
+	Memo1->Lines->Add("Struktura zbudowana poprawnie.");
+
+	ScanSphereFolder();
+
+	Button5->Enabled = true; //reset mix
+	Button6->Enabled = false;//sphere build
+    Button2->Enabled = false;// extractor tex map odf
+
+	}
+// ---------------------------------------------------------------------------
